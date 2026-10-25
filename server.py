@@ -17,24 +17,25 @@ MODELS = ["gemini-3.1-flash-lite", "gemini-3.8-flash"]    # tried in order if on
 VOICE = "ar-IQ-BasselNeural"                              # Iraqi male voice (ar-IQ-RanaNeural = female)
 IN_RATE = 8000                                            # what the robot sends
 OUT_RATE = 16000                                          # what the robot plays
-CHAT_WINDOW = 12                                          # seconds after a reply when no wake word is needed
 NAME = "روبوت"
 
 SYSTEM = f"""اسمك {NAME}، وانت روبوت صغير ظريف يحجي باللهجة العراقية البسيطة. المستخدم يحجي وياك بالصوت.
 اكتب اولا ما سمعته من المستخدم بالضبط كنص، بعدها اكتب ||| ، بعدها ردك.
 الشكل: <ما سمعته> ||| <ردك>
-{{MODE}}
 اذا ما في كلام واضح، اكتب فقط كلمة IGNORE.
 ردك يكون جملة او جملتين قصار فقط، بدون رموز او ايموجي او قوائم، لأنه راح ينقال بالصوت."""
 
-WAKE_MODE = (f"لا ترد الا اذا المستخدم ناداك باسمك ({NAME}، مثل: يا {NAME}، {NAME}، هلا {NAME}). "
-             "اذا ما ناداك باسمك، او الكلام مو موجه الك، اكتب فقط كلمة IGNORE. "
-             "اذا ناداك باسمك بس بدون سؤال، رد: نعم، اسمعك.")
-CHAT_MODE = "المستخدم يكمل الحديث وياك، فجاوبه مباشرة بدون ما يحتاج يناديك. اذا الكلام مو موجه الك اكتب IGNORE."
+TRANSCRIBE = "اكتب بالضبط ما قيل في هذا التسجيل الصوتي نصاً فقط، بدون اي اضافة. اذا ما في كلام بشري واضح اكتب فقط كلمة IGNORE."
+TEXT_SYSTEM = (f"اسمك {NAME}، وانت روبوت صغير ظريف يحجي باللهجة العراقية البسيطة. "
+               "ردك جملة او جملتين قصار فقط، بدون رموز او ايموجي او قوائم، لأنه راح ينقال بالصوت. "
+               "ابدأ ردك دائماً بوسم واحد بين اقواس مربعة يعبر عن شعورك بالرد، واحد من: [happy] [sad] [surprised] [love] [star] [wink] [neutral]. "
+               "مثلاً: [happy] هلا بيك! استخدم [love] للمحبة والشكر، [star] للاعجاب او الانجاز، [wink] للمزاح.")
+NAME_FORMS = ["روبوت", "روبت", "ربوت", "رووبوت", "روبووت", "روبوط", "روبو"]
+AWAKE_WINDOW = 14   # seconds the robot keeps listening after "نعم"
 
 app = Flask(__name__)
 history = []
-last_reply_at = 0.0
+awake_until = 0.0
 lock = threading.Lock()
 cache = {}
 
@@ -45,40 +46,76 @@ def wav_from_pcm(pcm: bytes, rate: int) -> bytes:
     return header + pcm
 
 
-def ask_gemini(pcm: bytes):
-    """Returns (heard, reply) or None when the robot should stay silent."""
-    import base64
-    global last_reply_at
-    in_chat = (time.time() - last_reply_at) < CHAT_WINDOW
-    system = SYSTEM.replace("{MODE}", CHAT_MODE if in_chat else WAKE_MODE)
-    audio = {"inlineData": {"mimeType": "audio/wav", "data": base64.b64encode(wav_from_pcm(pcm, IN_RATE)).decode()}}
-    contents = list(history) + [{"role": "user", "parts": [audio]}]
-    body = {"systemInstruction": {"parts": [{"text": system}]}, "contents": contents,
-            "generationConfig": {"maxOutputTokens": 300}}
-    text = None
+def _gemini(body):
     for model in MODELS:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
         try:
             r = requests.post(url, headers={"x-goog-api-key": API_KEY}, json=body, timeout=40)
             if r.status_code == 200:
                 parts = r.json()["candidates"][0]["content"]["parts"]
-                text = "".join(p.get("text", "") for p in parts).strip()
-                break
+                return "".join(p.get("text", "") for p in parts).strip()
             print("gemini", model, r.status_code, r.text[:200])
         except Exception as e:
             print("gemini error", model, e)
-    if text is None:
-        return ("", "صار عندي خطأ بالاتصال، جرب مرة ثانية.")
-    print("gemini:", text)
-    if not text or "IGNORE" in text:
+    return None
+
+
+def _norm(t):
+    import re
+    t = re.sub(r"[\u064B-\u0652\u0640]", "", t)
+    t = t.replace("أ", "ا").replace("إ", "ا").replace("آ", "ا").replace("ة", "ه").replace("ى", "ي")
+    return re.sub(r"[^\w\s]", " ", t).strip()
+
+
+def has_name(heard):
+    words = _norm(heard).split()
+    return any(w.lstrip("يوها") in NAME_FORMS or w in NAME_FORMS or w.lstrip("و") in NAME_FORMS or "روبوت" in w for w in words)
+
+
+def only_name(heard):
+    words = [w for w in _norm(heard).split() if not (w in ("يا", "هلا", "اهلا", "هاي", "مرحبا", "هلو", "الو", "اي") or has_name(w))]
+    return len(" ".join(words)) < 4
+
+
+def transcribe(pcm):
+    import base64
+    audio = {"inlineData": {"mimeType": "audio/wav", "data": base64.b64encode(wav_from_pcm(pcm, IN_RATE)).decode()}}
+    body = {"contents": [{"role": "user", "parts": [{"text": TRANSCRIBE}, audio]}], "generationConfig": {"maxOutputTokens": 150}}
+    t = _gemini(body)
+    print("transcript:", t)
+    if not t or "IGNORE" in t:
         return None
-    if "|||" in text:
-        heard, reply = [t.strip() for t in text.split("|||", 1)]
-    else:
-        heard, reply = "", text
-    if not reply or "IGNORE" in reply:
-        return None
-    return heard, reply[:300]
+    return t.strip()
+
+
+MOODS = {"happy", "sad", "surprised", "love", "star", "wink", "neutral"}
+NUM_WORDS = ["", "واحد", "اثنين", "ثلاثة", "اربعة", "خمسة", "ستة"]
+
+
+def respond(heard):
+    """Returns (reply, mood, dice). Dice rolls locally when the user asks for it."""
+    import random
+    n = _norm(heard)
+    if "نرد" in n or "زهر" in n or "dice" in n.lower():
+        d = random.randint(1, 6)
+        return f"رميت النرد وطلع الرقم {NUM_WORDS[d]}", "happy", d
+    import re
+    t = answer_text(heard)
+    m = re.match(r"\s*\[(\w+)\]\s*", t)
+    mood = "neutral"
+    if m:
+        if m.group(1).lower() in MOODS:
+            mood = m.group(1).lower()
+        t = t[m.end():]
+    t = re.sub(r"\[\w+\]", "", t).strip()
+    return (t or "تمام"), mood, 0
+
+
+def answer_text(heard):
+    contents = list(history) + [{"role": "user", "parts": [{"text": heard}]}]
+    body = {"systemInstruction": {"parts": [{"text": TEXT_SYSTEM}]}, "contents": contents, "generationConfig": {"maxOutputTokens": 300}}
+    t = _gemini(body)
+    return t[:300] if t else "صار عندي خطأ بالاتصال، جرب مرة ثانية."
 
 
 async def _tts(text: str) -> bytes:
@@ -115,29 +152,43 @@ def hello():
 
 @app.post("/talk")
 def talk():
-    global last_reply_at
+    global awake_until
     if not authorized():
         return ("no", 403)
     pcm = request.get_data()
     if len(pcm) < 4000:
         return ("", 204)
     with lock:
-        result = ask_gemini(pcm)
-        if result is None:
+        heard = transcribe(pcm)
+        if not heard:
             return ("", 204)
-        heard, reply = result
-        print("heard:", heard, "| reply:", reply)
-        if heard:
-            history.append({"role": "user", "parts": [{"text": heard}]})
-            history.append({"role": "model", "parts": [{"text": reply}]})
-            del history[:-12]
+        awake = time.time() < awake_until
+        if awake:
+            awake_until = 0                      # one question per call
+        elif has_name(heard):
+            if only_name(heard):
+                awake_until = time.time() + AWAKE_WINDOW
+                if "yes" not in cache:
+                    cache["yes"] = speak_pcm("نعم، اسمعك")
+                print("wake only ->", heard)
+                return Response(cache["yes"], mimetype="application/octet-stream", headers={"X-Awake": "1"})
+        else:
+            print("ignored:", heard)
+            return ("", 204)
+        reply, mood, dice = respond(heard)
+        print("heard:", heard, "| reply:", reply, "|", mood, dice)
+        history.append({"role": "user", "parts": [{"text": heard}]})
+        history.append({"role": "model", "parts": [{"text": reply}]})
+        del history[:-12]
     try:
         out = speak_pcm(reply)
     except Exception as e:
         print("tts error", e)
         return ("", 500)
-    last_reply_at = time.time()
-    return Response(out, mimetype="application/octet-stream")
+    headers = {"X-Mood": mood}
+    if dice:
+        headers["X-Dice"] = str(dice)
+    return Response(out, mimetype="application/octet-stream", headers=headers)
 
 
 @app.get("/")
