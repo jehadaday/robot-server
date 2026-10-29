@@ -13,7 +13,7 @@ FONT_PATHS = [
 W = H = 240
 FONT_SIZE = 27
 LINE_H = 37
-MARGIN = 8
+MARGIN = 16
 TEXT_TOP = 14
 MAX_LINES = 5
 MAX_PAGES = 6
@@ -156,9 +156,10 @@ def render_pages(text):
     for pi, grp in enumerate(groups):
         img = Image.new("L", (W, H), 0)
         d = ImageDraw.Draw(img)
+        d.rounded_rectangle((3, 3, W - 4, H - 4), radius=16, outline=255, width=2)       # frame
         block_h = len(grp) * LINE_H
         area_h = 196
-        y = TEXT_TOP + max(0, (area_h - block_h) // 2)
+        y = TEXT_TOP + 4 + max(0, (area_h - block_h) // 2)
         for words in grp:
             vis = _visual(words)
             w = f.getlength(vis)
