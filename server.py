@@ -27,7 +27,7 @@ API_KEY = os.environ.get("GEMINI_API_KEY", "")
 ROBOT_TOKEN = os.environ.get("ROBOT_TOKEN", "")          # shared secret with the robot (set it on Render)
 SHEET_URL = os.environ.get("SHEET_CSV_URL", "")          # Google Sheet link (published CSV or normal share link)
 SHEET_REFRESH = 60                                       # seconds between sheet re-reads
-MODELS = ["gemini-3.1-flash-lite", "gemini-3.8-flash", "gemini-2.5-flash"]    # tried in order if one is rate-limited
+MODELS = ["gemini-3.1-flash-lite", "gemini-3.8-flash", "gemini-flash-lite-latest", "gemini-flash-latest"]    # tried in order if one is rate-limited
 VOICE = "ar-IQ-BasselNeural"                              # Iraqi male voice (ar-IQ-RanaNeural = female)
 IN_RATE = 8000                                            # what the robot sends
 OUT_RATE = 16000                                          # what the robot plays
@@ -188,8 +188,13 @@ def sheet_loop():
 
 
 # ---------------------------------------------------------------- Gemini
+_cool = {}          # model -> time until we skip it (quota exceeded / not available)
+
+
 def _gemini(body):
     for model in MODELS:
+        if _cool.get(model, 0) > time.time():
+            continue
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
         try:
             fast = json.loads(json.dumps(body))
@@ -201,6 +206,10 @@ def _gemini(body):
                 parts = r.json()["candidates"][0]["content"]["parts"]
                 return "".join(p.get("text", "") for p in parts).strip()
             print("gemini", model, r.status_code, r.text[:200])
+            if r.status_code in (429, 503):
+                _cool[model] = time.time() + 45
+            elif r.status_code in (403, 404):
+                _cool[model] = time.time() + 3600
         except Exception as e:
             print("gemini error", model, e)
     return None
