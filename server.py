@@ -27,7 +27,7 @@ API_KEY = os.environ.get("GEMINI_API_KEY", "")
 ROBOT_TOKEN = os.environ.get("ROBOT_TOKEN", "")          # shared secret with the robot (set it on Render)
 SHEET_URL = os.environ.get("SHEET_CSV_URL", "")          # Google Sheet link (published CSV or normal share link)
 SHEET_REFRESH = 60                                       # seconds between sheet re-reads
-MODELS = ["gemini-3.1-flash-lite", "gemini-3.8-flash"]    # tried in order if one is rate-limited
+MODELS = ["gemini-3.1-flash-lite", "gemini-3.8-flash", "gemini-2.5-flash"]    # tried in order if one is rate-limited
 VOICE = "ar-IQ-BasselNeural"                              # Iraqi male voice (ar-IQ-RanaNeural = female)
 IN_RATE = 8000                                            # what the robot sends
 OUT_RATE = 16000                                          # what the robot plays
@@ -176,9 +176,9 @@ def _gemini(body):
         try:
             fast = json.loads(json.dumps(body))
             fast.setdefault("generationConfig", {})["thinkingConfig"] = {"thinkingBudget": 0}     # no "thinking" = faster
-            r = requests.post(url, headers={"x-goog-api-key": API_KEY}, json=fast, timeout=40)
+            r = requests.post(url, headers={"x-goog-api-key": API_KEY}, json=fast, timeout=12)
             if r.status_code == 400:          # model doesn't accept that setting: retry plain
-                r = requests.post(url, headers={"x-goog-api-key": API_KEY}, json=body, timeout=40)
+                r = requests.post(url, headers={"x-goog-api-key": API_KEY}, json=body, timeout=12)
             if r.status_code == 200:
                 parts = r.json()["candidates"][0]["content"]["parts"]
                 return "".join(p.get("text", "") for p in parts).strip()
@@ -498,11 +498,11 @@ def talk():
     if len(pcm) < 4000:
         return ("", 204)
     t0 = time.time()
+    heard, kind, item = listen_and_match(pcm)          # slow network call: not under the lock
+    print(f"timing listen+match {time.time() - t0:.1f}s")
+    if not heard:
+        return ("", 204)
     with lock:
-        heard, kind, item = listen_and_match(pcm)
-        print(f"timing listen+match {time.time() - t0:.1f}s")
-        if not heard:
-            return ("", 204)
         awake = time.time() < awake_until
         if not awake:
             if not starts_with_name(heard):
