@@ -147,7 +147,7 @@ def load_sheet(force=False):
     text, src = None, ""
     if url:
         try:
-            r = requests.get(url, timeout=12)
+            r = requests.get(url + ("&" if "?" in url else "?") + f"_cb={int(time.time())}", headers={"Cache-Control": "no-cache"}, timeout=12)      # cache-buster: Google may serve a stale copy
             r.encoding = "utf-8"
             if r.status_code == 200 and "<html" not in r.text[:300].lower():
                 text, src = r.text, "online"
