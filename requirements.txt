@@ -3,3 +3,4 @@ gunicorn
 requests
 edge-tts
 miniaudio
+pillow
