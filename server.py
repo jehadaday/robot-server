@@ -1,6 +1,7 @@
 """University information-desk robot server.
 ESP32 sends raw 8 kHz PCM -> Gemini transcribes -> wake name check -> Gemini picks the matching question
 from the Google Sheet -> cached edge-tts voice + Arabic text pages (for the screen) go back to the robot."""
+import array
 import asyncio
 import csv
 import difflib
@@ -171,7 +172,11 @@ def _gemini(body):
     for model in MODELS:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
         try:
-            r = requests.post(url, headers={"x-goog-api-key": API_KEY}, json=body, timeout=40)
+            fast = json.loads(json.dumps(body))
+            fast.setdefault("generationConfig", {})["thinkingConfig"] = {"thinkingBudget": 0}     # no "thinking" = faster
+            r = requests.post(url, headers={"x-goog-api-key": API_KEY}, json=fast, timeout=40)
+            if r.status_code == 400:          # model doesn't accept that setting: retry plain
+                r = requests.post(url, headers={"x-goog-api-key": API_KEY}, json=body, timeout=40)
             if r.status_code == 200:
                 parts = r.json()["candidates"][0]["content"]["parts"]
                 return "".join(p.get("text", "") for p in parts).strip()
@@ -190,6 +195,38 @@ def transcribe(pcm):
     if not t or "IGNORE" in t:
         return None
     return t.strip()
+
+
+def listen_and_match(pcm):
+    """One Gemini call: transcript + matched row. -> (heard, kind, item) ; heard None = nothing said."""
+    import base64
+    items = kb.items
+    if not items:
+        return transcribe(pcm), "NONE", None
+    listing = "\n".join(f"{it['id']}: " + " / ".join(it["questions"][:6]) for it in (items if len(items) <= 120 else items[:120]))
+    prompt = (f"هذا تسجيل صوتي لطالب يسأل روبوت استعلامات في {kb.university or 'الجامعة'}. "
+              "اولا اكتب ما قيل بالضبط نصاً. بعدها اكتب ||| . بعدها اكتب رقم السطر من القائمة ادناه الذي يطابق معنى السؤال "
+              "(تجاهل اسم الروبوت اذا نُودي). اذا كان ترحيب او سلام اكتب HELLO، شكر اكتب THANKS، يسأل من انت او شنو تسوي اكتب WHO، "
+              "واذا ما يطابق اي سطر بوضوح اكتب NONE.\n"
+              "الشكل: <ما قيل> ||| <رقم او كلمة>\nاذا ما في كلام بشري واضح اكتب فقط IGNORE.\n\nالقائمة:\n" + listing)
+    audio = {"inlineData": {"mimeType": "audio/wav", "data": base64.b64encode(wav_from_pcm(pcm, IN_RATE)).decode()}}
+    t = _gemini({"contents": [{"role": "user", "parts": [{"text": prompt}, audio]}], "generationConfig": {"maxOutputTokens": 200}})
+    print("merged raw:", t)
+    if not t or "IGNORE" in t:
+        return None, "NONE", None
+    if "|||" not in t:
+        return t.strip(), None, None            # malformed: caller falls back to the 2-step path
+    heard, code = [x.strip() for x in t.split("|||", 1)]
+    up = code.upper()
+    for k in ("HELLO", "THANKS", "WHO", "NONE"):
+        if k in up:
+            return heard, k, None
+    m = re.search(r"\d+", code)
+    if m:
+        for it in items:
+            if it["id"] == int(m.group()):
+                return heard, "item", it
+    return heard, "NONE", None
 
 
 # ---------------------------------------------------------------- wake name
@@ -300,10 +337,11 @@ def canned(kind):
     return "ما عندي هذي المعلومة، راجع مكتب الاستعلامات بالجامعة.", "neutral"
 
 
-def answer_for(heard):
+def answer_for(heard, kind=None, item=None):
     """-> (spoken, screen, mood)"""
-    question = strip_name(heard) or heard
-    kind, item = match_question(question)
+    if kind is None:
+        question = strip_name(heard) or heard
+        kind, item = match_question(question)
     if kind == "item":
         return item["spoken"], item["screen"], item["mood"]
     text, mood = canned(kind)
@@ -348,7 +386,12 @@ def speak_pcm(text: str) -> bytes:
         return c
     mp3 = asyncio.run(_tts(text))
     dec = miniaudio.decode(mp3, output_format=miniaudio.SampleFormat.SIGNED16, nchannels=1, sample_rate=OUT_RATE)
-    pcm = dec.samples.tobytes()
+    samples = array.array("h", dec.samples.tobytes())
+    peak = max(max(samples), -min(samples)) if samples else 0
+    if peak > 0:                                   # normalise to ~90% of full scale: loud but never clipped
+        g = min(4.0, 0.9 * 32767 / peak)
+        samples = array.array("h", (int(v * g) for v in samples))
+    pcm = samples.tobytes()
     tts_cache.put(text, pcm)
     return pcm
 
@@ -436,8 +479,10 @@ def talk():
     pcm = request.get_data()
     if len(pcm) < 4000:
         return ("", 204)
+    t0 = time.time()
     with lock:
-        heard = transcribe(pcm)
+        heard, kind, item = listen_and_match(pcm)
+        print(f"timing listen+match {time.time() - t0:.1f}s")
         if not heard:
             return ("", 204)
         awake = time.time() < awake_until
@@ -450,10 +495,12 @@ def talk():
                 print("wake only ->", heard)
                 return Response(speak_pcm("نعم، اسمعك"), mimetype="application/octet-stream", headers={"X-Awake": "1"})
         awake_until = 0
-        spoken, screen, mood = answer_for(heard)
+        spoken, screen, mood = answer_for(heard, kind, item)
     print("heard:", heard, "| reply:", spoken, "|", mood)
     try:
+        t1 = time.time()
         body, headers = build_body(spoken, screen)
+        print(f"timing voice+pages {time.time() - t1:.1f}s, total {time.time() - t0:.1f}s")
     except Exception as e:
         print("tts error", e)
         return ("", 500)
