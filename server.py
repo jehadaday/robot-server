@@ -64,6 +64,9 @@ class KB:
     university = ""
     names = ["روبوت"]
     greeting = ""
+    voice = ""        # sheet override: صوت (رنا / باسل)
+    rate = ""         # sheet override: سرعة الصوت
+    prons = []        # sheet: نطق rows -> [(written, spoken)]
     items = []        # {"id","questions","spoken","screen","mood","norm"}
     digest = ""
     loaded_at = 0.0
@@ -94,6 +97,7 @@ def split_questions(cell):
 def parse_sheet(text):
     rows = list(csv.reader(io.StringIO(text.lstrip("﻿"))))
     uni, names, greeting, items = "", [], "", []
+    st = {"voice": "", "rate": "", "prons": []}
     for r in rows:
         r = [c.strip() for c in r]
         if not r or not r[0]:
@@ -111,6 +115,17 @@ def parse_sheet(text):
         if key.startswith("رساله الترحيب") or key == "الترحيب":
             greeting = val
             continue
+        if key == "صوت" or key.startswith("صوت الروبوت"):
+            st["voice"] = val
+            continue
+        if key.startswith("سرعه") or key == "السرعه":
+            st["rate"] = val
+            continue
+        if key == "نطق" or key.startswith("تصحيح النطق"):
+            tgt = r[2] if len(r) > 2 else ""
+            if val and tgt:
+                st["prons"].append((val, tgt))
+            continue
         if key.startswith("الاسئله") or key in ("السؤال", "سؤال"):
             continue          # header row
         spoken = val
@@ -122,6 +137,7 @@ def parse_sheet(text):
         if qs:
             items.append({"id": len(items) + 1, "questions": qs, "spoken": spoken, "screen": screen, "mood": mood,
                           "norm": [_norm(q) for q in qs]})
+    parse_sheet.settings = st
     return uni, names, greeting, items
 
 
@@ -153,6 +169,8 @@ def load_sheet(force=False):
         return
     uni, names, greeting, items = parse_sheet(text)
     kb.university, kb.names, kb.greeting, kb.items = uni, names or ["روبوت"], greeting, items
+    st = getattr(parse_sheet, "settings", {})
+    kb.voice, kb.rate, kb.prons = st.get("voice", ""), st.get("rate", ""), st.get("prons", [])
     kb.digest, kb.loaded_at, kb.source = d, time.time(), src
     if src == "online":
         kb.error = ""
@@ -389,19 +407,50 @@ tts_cache = LRU(300)
 page_cache = LRU(300)
 
 
-async def _tts(text: str) -> bytes:
+def voice_name():
+    v = _norm(kb.voice)
+    if v.startswith("رنا") or "rana" in v or "انث" in v:
+        return "ar-IQ-RanaNeural"
+    if v.startswith("باسل") or "bassel" in v or "ذكر" in v:
+        return "ar-IQ-BasselNeural"
+    return VOICE
+
+
+def voice_rate():
+    r = (kb.rate or "").strip()
+    n = _norm(r)
+    if n.startswith("بطي"):
+        return "-12%"
+    if n.startswith("سريع"):
+        return "+10%"
+    m = re.fullmatch(r"([+-]?\d{1,2})\s*%?", r)
+    if m and r:
+        v = max(-40, min(40, int(m.group(1))))
+        return f"{v:+d}%"
+    return "+0%"
+
+
+def apply_pron(text):
+    for a, b in kb.prons:
+        text = text.replace(a, b)
+    return text
+
+
+async def _tts(text: str, voice: str, rate: str) -> bytes:
     mp3 = b""
-    async for part in edge_tts.Communicate(text, VOICE).stream():
+    async for part in edge_tts.Communicate(text, voice, rate=rate).stream():
         if part["type"] == "audio":
             mp3 += part["data"]
     return mp3
 
 
 def speak_pcm(text: str) -> bytes:
-    c = tts_cache.get(text)
+    voice, rate = voice_name(), voice_rate()
+    key = f"{voice}|{rate}|{text}"
+    c = tts_cache.get(key)
     if c is not None:
         return c
-    mp3 = asyncio.run(_tts(text))
+    mp3 = asyncio.run(_tts(apply_pron(text), voice, rate))
     dec = miniaudio.decode(mp3, output_format=miniaudio.SampleFormat.SIGNED16, nchannels=1, sample_rate=OUT_RATE)
     samples = array.array("h", dec.samples.tobytes())
     peak = max(max(samples), -min(samples)) if samples else 0
@@ -410,7 +459,7 @@ def speak_pcm(text: str) -> bytes:
         norm = math.tanh(k)
         samples = array.array("h", (int(30000 * math.tanh(k * v / peak) / norm) for v in samples))
     pcm = samples.tobytes()
-    tts_cache.put(text, pcm)
+    tts_cache.put(key, pcm)
     return pcm
 
 
