@@ -8,6 +8,7 @@ import difflib
 import hashlib
 import io
 import json
+import math
 import os
 import re
 import struct
@@ -30,6 +31,7 @@ MODELS = ["gemini-3.1-flash-lite", "gemini-3.8-flash"]    # tried in order if on
 VOICE = "ar-IQ-BasselNeural"                              # Iraqi male voice (ar-IQ-RanaNeural = female)
 IN_RATE = 8000                                            # what the robot sends
 OUT_RATE = 16000                                          # what the robot plays
+VOICE_DRIVE = 2.0                                         # voice loudness (1 = as is, 2 = louder, 3 = very loud)
 AWAKE_WINDOW = 14                                         # seconds the robot keeps listening after "نعم"
 HERE = os.path.dirname(os.path.abspath(__file__))
 LOCAL_SHEET = os.path.join(HERE, "sheet_sample.csv")      # used until/unless the online sheet can be read
@@ -389,8 +391,9 @@ def speak_pcm(text: str) -> bytes:
     samples = array.array("h", dec.samples.tobytes())
     peak = max(max(samples), -min(samples)) if samples else 0
     if peak > 0:                                   # normalise to ~90% of full scale: loud but never clipped
-        g = min(4.0, 0.9 * 32767 / peak)
-        samples = array.array("h", (int(v * g) for v in samples))
+        k = VOICE_DRIVE                                # soft limiter: louder on average, no harsh clipping
+        norm = math.tanh(k)
+        samples = array.array("h", (int(30000 * math.tanh(k * v / peak) / norm) for v in samples))
     pcm = samples.tobytes()
     tts_cache.put(text, pcm)
     return pcm
