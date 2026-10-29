@@ -262,6 +262,21 @@ def has_name(heard):
     return any(_word_is_name(w, forms) for w in n.split())
 
 
+def starts_with_name(heard):
+    """True only when the utterance BEGINS with the wake name (optionally after a greeting like 'يا' / 'هلا')."""
+    n = _norm(heard)
+    forms = name_forms()
+    words = n.split()
+    while words and words[0] in GREETING_WORDS:
+        words = words[1:]
+    if not words:
+        return False
+    head = " ".join(words[:3])
+    if any(" " in f and head.startswith(f) for f in forms):
+        return True
+    return _word_is_name(words[0], forms)
+
+
 def strip_name(heard):
     """Heard text without the wake name and greeting words."""
     n = _norm(heard)
@@ -490,7 +505,7 @@ def talk():
             return ("", 204)
         awake = time.time() < awake_until
         if not awake:
-            if not has_name(heard):
+            if not starts_with_name(heard):
                 print("ignored:", heard)
                 return ("", 204)
             if only_name(heard):
