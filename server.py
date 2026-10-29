@@ -552,7 +552,7 @@ def talk():
     if not heard:
         return ("", 204)
     with lock:
-        awake = time.time() < awake_until
+        awake = time.time() < awake_until or request.headers.get("X-Force") == "1"      # X-Force: robot button pressed
         if not awake:
             if not starts_with_name(heard):
                 print("ignored:", heard)
