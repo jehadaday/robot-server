@@ -66,6 +66,7 @@ class KB:
     greeting = ""
     voice = ""        # sheet override: صوت (رنا / باسل)
     rate = ""         # sheet override: سرعة الصوت
+    drive = ""        # sheet override: قوة الصوت (loudness 0.8 - 3)
     prons = []        # sheet: نطق rows -> [(written, spoken)]
     items = []        # {"id","questions","spoken","screen","mood","norm"}
     digest = ""
@@ -97,7 +98,7 @@ def split_questions(cell):
 def parse_sheet(text):
     rows = list(csv.reader(io.StringIO(text.lstrip("﻿"))))
     uni, names, greeting, items = "", [], "", []
-    st = {"voice": "", "rate": "", "prons": []}
+    st = {"voice": "", "rate": "", "drive": "", "prons": []}
     for r in rows:
         r = [c.strip() for c in r]
         if not r or not r[0]:
@@ -117,6 +118,9 @@ def parse_sheet(text):
             continue
         if key == "صوت" or key.startswith("صوت الروبوت"):
             st["voice"] = val
+            continue
+        if key.startswith("قوه الصوت") or key.startswith("مستوي الصوت") or key.startswith("علو الصوت"):
+            st["drive"] = val
             continue
         if key.startswith("سرعه") or key == "السرعه":
             st["rate"] = val
@@ -171,6 +175,7 @@ def load_sheet(force=False):
     kb.university, kb.names, kb.greeting, kb.items = uni, names or ["روبوت"], greeting, items
     st = getattr(parse_sheet, "settings", {})
     kb.voice, kb.rate, kb.prons = st.get("voice", ""), st.get("rate", ""), st.get("prons", [])
+    kb.drive = st.get("drive", "")
     kb.digest, kb.loaded_at, kb.source = d, time.time(), src
     if src == "online":
         kb.error = ""
@@ -439,6 +444,13 @@ def voice_rate():
     return "+0%"
 
 
+def voice_drive():
+    try:
+        return max(0.8, min(3.0, float((kb.drive or "").replace(",", "."))))
+    except ValueError:
+        return VOICE_DRIVE
+
+
 def apply_pron(text):
     for a, b in kb.prons:
         text = text.replace(a, b)
@@ -454,8 +466,8 @@ async def _tts(text: str, voice: str, rate: str) -> bytes:
 
 
 def speak_pcm(text: str) -> bytes:
-    voice, rate = voice_name(), voice_rate()
-    key = f"{voice}|{rate}|{text}"
+    voice, rate, drive = voice_name(), voice_rate(), voice_drive()
+    key = f"{voice}|{rate}|{drive}|{text}"
     c = tts_cache.get(key)
     if c is not None:
         return c
@@ -464,7 +476,7 @@ def speak_pcm(text: str) -> bytes:
     samples = array.array("h", dec.samples.tobytes())
     peak = max(max(samples), -min(samples)) if samples else 0
     if peak > 0:                                   # normalise to ~90% of full scale: loud but never clipped
-        k = VOICE_DRIVE                                # soft limiter: louder on average, no harsh clipping
+        k = drive                                # soft limiter: louder on average, no harsh clipping
         norm = math.tanh(k)
         samples = array.array("h", (int(30000 * math.tanh(k * v / peak) / norm) for v in samples))
     pcm = samples.tobytes()
