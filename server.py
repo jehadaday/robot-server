@@ -568,6 +568,11 @@ def talk():
     if len(pcm) < 4000:
         return ("", 204)
     t0 = time.time()
+    if time.time() - kb.loaded_at > 20:                # sheet is re-read before answering (the background loop alone was not reliable)
+        try:
+            load_sheet()
+        except Exception as e:
+            print("sheet refresh error", e)
     heard, kind, item = listen_and_match(pcm)          # slow network call: not under the lock
     print(f"timing listen+match {time.time() - t0:.1f}s")
     if not heard:
